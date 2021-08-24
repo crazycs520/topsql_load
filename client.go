@@ -149,6 +149,9 @@ func (c *TopSQLClient) InitSchemaForInstance(instanceCount int) error {
 		if err != nil {
 			return err
 		}
+		setTiflash := fmt.Sprintf("alter table %v set tiflash replica 1;", instance.getTableName())
+		// ignore the error.
+		cli.Exec(setTiflash)
 	}
 
 	buf := bytes.NewBuffer(make([]byte, 0, 4096))
