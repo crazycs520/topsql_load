@@ -14,6 +14,7 @@ import (
 var (
 	BeginTimestamp  = flag.Int64("begin-ts", time.Now().Unix(), "begin unix timestamp in second. Can be set an early ts to import tons of data, or a recent ts to import data per minute.")
 	SQLCount        = flag.Int("sql-count", 200, "tag count per second")
+	SQLChangeMinute = flag.Int("sql-change-minute", 1, "sql change minute")
 	InstanceCount   = flag.Uint("instance-count", 1, "instance count")
 	ThreadCount     = flag.Int("thread", 1, "thread count for concurrency")
 	Minutes         = flag.Uint("minute", 1, "duration, the unit is minute")
@@ -41,7 +42,7 @@ func main() {
 		startTime := time.Now()
 		start_ts, end_ts := getTimeRange()
 		fmt.Printf("start to prepare data, start_ts: %v, end_ts: %v, sql_count: %v\n", *BeginTimestamp, end_ts, *SQLCount)
-		err := client.PrepareData(*InstanceCount, start_ts, end_ts, *SQLCount)
+		err := client.PrepareData(*InstanceCount, start_ts, end_ts, *SQLCount, *SQLChangeMinute)
 		if err != nil {
 			fmt.Printf("%v\n", err)
 			os.Exit(-1)
