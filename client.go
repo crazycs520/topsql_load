@@ -24,18 +24,18 @@ type TopSQLClient struct {
 	dbConn      *DBConnection
 	instances   []InstanceMeta
 
-	insertedMetaMu sync.Mutex
+	insertedMetaMu  sync.Mutex
 	insertedMetaMap map[int]struct{}
 }
 
 func newTopSQLClient(concurrency int, dbConn *DBConnection) *TopSQLClient {
 	client := &TopSQLClient{
-		instanceCache: lru.NewSimpleLRUCache(1000),
-		sqlMetaCache:  lru.NewSimpleLRUCache(100_0000),
-		planMetaCache: lru.NewSimpleLRUCache(100_0000),
+		instanceCache:   lru.NewSimpleLRUCache(1000),
+		sqlMetaCache:    lru.NewSimpleLRUCache(100_0000),
+		planMetaCache:   lru.NewSimpleLRUCache(100_0000),
 		insertedMetaMap: make(map[int]struct{}),
-		concurrency:   concurrency,
-		dbConn:        dbConn,
+		concurrency:     concurrency,
+		dbConn:          dbConn,
 	}
 
 	return client
@@ -46,12 +46,12 @@ func (c *TopSQLClient) PrepareData(instanceCount uint, start_ts int64, end_ts in
 	if err != nil {
 		return err
 	}
-	err = c.InitSchemaForInstance(int(instanceCount))
+	err = c.InitSchemaForInstance(int(instanceCount), start_ts)
 	if err != nil {
 		return err
 	}
 
-	c.LoadMetricsData(start_ts, end_ts, sqlCount,sqlChangeMinute)
+	c.LoadMetricsData(start_ts, end_ts, sqlCount, sqlChangeMinute)
 	return nil
 }
 
@@ -132,10 +132,24 @@ func (c *TopSQLClient) InitMetaSchema() error {
 	return nil
 }
 
-func (c *TopSQLClient) InitSchemaForInstance(instanceCount int) error {
+const oneDaySeconds = 24 * 60 * 60
+
+func (c *TopSQLClient) InitSchemaForInstance(instanceCount int, start_ts int64) error {
 	cli := c.dbConn.GetSQLClient()
 	defer c.dbConn.PutSQLClient(cli)
 	instances := make([]InstanceMeta, 0, instanceCount)
+
+	start_ts = ((start_ts / oneDaySeconds) + 1) * oneDaySeconds
+	partitionDef := bytes.NewBuffer(nil)
+	partitionDef.WriteString("PARTITION BY RANGE (timestamp) (")
+	for i := 0; i < 7; i++ {
+		if i > 0 {
+			partitionDef.WriteByte(',')
+		}
+		partitionDef.WriteString(fmt.Sprintf("PARTITION p%[1]v VALUES LESS THAN (%[1]v)", start_ts+int64(i*oneDaySeconds)))
+	}
+	partitionDef.WriteString(");")
+
 	for i := 1; i <= instanceCount; i++ {
 		instance := InstanceMeta{
 			ip: "instance_" + strconv.Itoa(i),
@@ -147,7 +161,8 @@ func (c *TopSQLClient) InitSchemaForInstance(instanceCount int) error {
 	plan_id BIGINT,
 	timestamp BIGINT NOT NULL,
 	cpu_time_ms INT NOT NULL
-);`, instance.getTableName())
+)`, instance.getTableName())
+		schema += partitionDef.String()
 
 		_, err := cli.Exec(schema)
 		if err != nil {
@@ -192,7 +207,7 @@ type InsertMeta struct {
 	planID     int
 }
 
-func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount,sqlChangeMinute int) {
+func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount, sqlChangeMinute int) {
 	if c.concurrency < 1 {
 		c.concurrency = 1
 	}
@@ -219,7 +234,7 @@ func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount,sq
 				os.Exit(-1)
 			}
 		}()
-		if (ts-lastSQLBaseChangeTs) >= sqlChangeSeconds {
+		if (ts - lastSQLBaseChangeTs) >= sqlChangeSeconds {
 			sqlBaseCount += sqlCount
 			lastSQLBaseChangeTs = ts
 		}
@@ -232,7 +247,7 @@ func (c *TopSQLClient) loadData(start_ts, end_ts int64, sqlCount, sqlBaseCount i
 	defer c.dbConn.PutSQLClient(cli)
 
 	metas := c.genInsertMeta(sqlCount, sqlBaseCount)
-	err := c.insertSQLPlanMeta(metas,cli)
+	err := c.insertSQLPlanMeta(metas, cli)
 	if err != nil {
 		return err
 	}
@@ -246,19 +261,18 @@ func (c *TopSQLClient) loadData(start_ts, end_ts int64, sqlCount, sqlBaseCount i
 	return err
 }
 
-
 func (c *TopSQLClient) insertSQLPlanMeta(metas []InsertMeta, cli *sql.DB) error {
-	if len(metas) ==0 {
+	if len(metas) == 0 {
 		return nil
 	}
 	id := metas[0].sqlID
 	inserted := false
 	c.insertedMetaMu.Lock()
-	_,ok := c.insertedMetaMap[id]
+	_, ok := c.insertedMetaMap[id]
 	if ok {
 		inserted = true
-	}else {
-		c.insertedMetaMap[id]= struct{}{}
+	} else {
+		c.insertedMetaMap[id] = struct{}{}
 	}
 	c.insertedMetaMu.Unlock()
 	if inserted {
