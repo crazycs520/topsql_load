@@ -218,6 +218,10 @@ func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount, s
 	lastSQLBaseChangeTs := start_ts
 	sqlChangeSeconds := int64(sqlChangeMinute * 60)
 	for ts := start_ts; ts < end_ts; ts += step {
+		if (ts - lastSQLBaseChangeTs) >= sqlChangeSeconds {
+			sqlBaseCount += sqlCount
+			lastSQLBaseChangeTs = ts
+		}
 		start := ts
 		end := start + step
 		limitCh <- struct{}{}
@@ -234,10 +238,6 @@ func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount, s
 				os.Exit(-1)
 			}
 		}()
-		if (ts - lastSQLBaseChangeTs) >= sqlChangeSeconds {
-			sqlBaseCount += sqlCount
-			lastSQLBaseChangeTs = ts
-		}
 	}
 	wg.Wait()
 }
