@@ -24,18 +24,18 @@ type TopSQLClient struct {
 	dbConn      *DBConnection
 	instances   []InstanceMeta
 
-	insertedMetaMu sync.Mutex
+	insertedMetaMu  sync.Mutex
 	insertedMetaMap map[int]struct{}
 }
 
 func newTopSQLClient(concurrency int, dbConn *DBConnection) *TopSQLClient {
 	client := &TopSQLClient{
-		instanceCache: lru.NewSimpleLRUCache(1000),
-		sqlMetaCache:  lru.NewSimpleLRUCache(100_0000),
-		planMetaCache: lru.NewSimpleLRUCache(100_0000),
+		instanceCache:   lru.NewSimpleLRUCache(1000),
+		sqlMetaCache:    lru.NewSimpleLRUCache(100_0000),
+		planMetaCache:   lru.NewSimpleLRUCache(100_0000),
 		insertedMetaMap: make(map[int]struct{}),
-		concurrency:   concurrency,
-		dbConn:        dbConn,
+		concurrency:     concurrency,
+		dbConn:          dbConn,
 	}
 
 	return client
@@ -51,7 +51,7 @@ func (c *TopSQLClient) PrepareData(instanceCount uint, start_ts int64, end_ts in
 		return err
 	}
 
-	c.LoadMetricsData(start_ts, end_ts, sqlCount,sqlChangeMinute)
+	c.LoadMetricsData(start_ts, end_ts, sqlCount, sqlChangeMinute)
 	return nil
 }
 
@@ -192,7 +192,7 @@ type InsertMeta struct {
 	planID     int
 }
 
-func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount,sqlChangeMinute int) {
+func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount, sqlChangeMinute int) {
 	if c.concurrency < 1 {
 		c.concurrency = 1
 	}
@@ -203,6 +203,10 @@ func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount,sq
 	lastSQLBaseChangeTs := start_ts
 	sqlChangeSeconds := int64(sqlChangeMinute * 60)
 	for ts := start_ts; ts < end_ts; ts += step {
+		if (ts - lastSQLBaseChangeTs) >= sqlChangeSeconds {
+			sqlBaseCount += sqlCount
+			lastSQLBaseChangeTs = ts
+		}
 		start := ts
 		end := start + step
 		limitCh <- struct{}{}
@@ -219,10 +223,6 @@ func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount,sq
 				os.Exit(-1)
 			}
 		}()
-		if (ts-lastSQLBaseChangeTs) >= sqlChangeSeconds {
-			sqlBaseCount += sqlCount
-			lastSQLBaseChangeTs = ts
-		}
 	}
 	wg.Wait()
 }
@@ -232,7 +232,7 @@ func (c *TopSQLClient) loadData(start_ts, end_ts int64, sqlCount, sqlBaseCount i
 	defer c.dbConn.PutSQLClient(cli)
 
 	metas := c.genInsertMeta(sqlCount, sqlBaseCount)
-	err := c.insertSQLPlanMeta(metas,cli)
+	err := c.insertSQLPlanMeta(metas, cli)
 	if err != nil {
 		return err
 	}
@@ -246,19 +246,18 @@ func (c *TopSQLClient) loadData(start_ts, end_ts int64, sqlCount, sqlBaseCount i
 	return err
 }
 
-
 func (c *TopSQLClient) insertSQLPlanMeta(metas []InsertMeta, cli *sql.DB) error {
-	if len(metas) ==0 {
+	if len(metas) == 0 {
 		return nil
 	}
 	id := metas[0].sqlID
 	inserted := false
 	c.insertedMetaMu.Lock()
-	_,ok := c.insertedMetaMap[id]
+	_, ok := c.insertedMetaMap[id]
 	if ok {
 		inserted = true
-	}else {
-		c.insertedMetaMap[id]= struct{}{}
+	} else {
+		c.insertedMetaMap[id] = struct{}{}
 	}
 	c.insertedMetaMu.Unlock()
 	if inserted {
