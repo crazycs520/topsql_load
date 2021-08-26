@@ -56,6 +56,15 @@ func (c *TopSQLClient) PrepareData(instanceCount uint, start_ts int64, end_ts in
 }
 
 func (c *TopSQLClient) QueryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64) error {
+	for i := 0; i < c.concurrency-1; i++ {
+		go func() {
+			c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts)
+		}()
+	}
+	return c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts)
+}
+
+func (c *TopSQLClient) queryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64) error {
 	cli := c.dbConn.GetSQLClient()
 	defer c.dbConn.PutSQLClient(cli)
 
