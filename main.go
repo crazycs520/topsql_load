@@ -48,12 +48,22 @@ func main() {
 			os.Exit(-1)
 		}
 		fmt.Printf("prepare data finish, cost %s\n", time.Since(startTime))
-	case "query":
+	case "prepare-agg":
+		startTime := time.Now()
+		start_ts, end_ts := getTimeRange()
+		fmt.Printf("start to prepare agg data, start_ts: %v, end_ts: %v\n", *BeginTimestamp, end_ts)
+		err := client.PrepareAggData(*InstanceCount, start_ts, end_ts)
+		if err != nil {
+			fmt.Printf("%v\n", err)
+			os.Exit(-1)
+		}
+		fmt.Printf("prepare agg data finish, cost %s\n", time.Since(startTime))
+	case "query", "query-agg":
 		start_ts, end_ts := getTimeRange()
 		var instanceIDs []int
 		var err error
-		if *InstanceCount !=0 {
-			for i:=1;i<= int(*InstanceCount);i++ {
+		if *InstanceCount != 0 {
+			for i := 1; i <= int(*InstanceCount); i++ {
 				instanceIDs = append(instanceIDs, i)
 			}
 		}
@@ -64,7 +74,7 @@ func main() {
 				os.Exit(-1)
 			}
 		}
-		err = client.QueryTopNSQL(instanceIDs, *QueryWindowSize, *QueryTopN, start_ts, end_ts)
+		err = client.QueryTopNSQL(instanceIDs, *QueryWindowSize, *QueryTopN, start_ts, end_ts, *Command == "query-agg")
 		if err != nil {
 			fmt.Printf("query error: %v\n", err)
 			os.Exit(-1)
