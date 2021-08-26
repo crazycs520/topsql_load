@@ -55,16 +55,26 @@ func (c *TopSQLClient) PrepareData(instanceCount uint, start_ts int64, end_ts in
 	return nil
 }
 
-func (c *TopSQLClient) QueryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64) error {
-	for i := 0; i < c.concurrency-1; i++ {
-		go func() {
-			c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts)
-		}()
+func (c *TopSQLClient) PrepareAggData(instanceCount uint, start_ts int64, end_ts int64) error {
+	err := c.InitSchemaForInstanceAgg(int(instanceCount))
+	if err != nil {
+		return err
 	}
-	return c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts)
+
+	c.LoadAggMetricsData(start_ts, end_ts)
+	return nil
 }
 
-func (c *TopSQLClient) queryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64) error {
+func (c *TopSQLClient) QueryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64, fromAgg bool) error {
+	for i := 0; i < c.concurrency-1; i++ {
+		go func() {
+			c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts, fromAgg)
+		}()
+	}
+	return c.queryTopNSQL(instanceIDs, windowSize, topN, start_ts, end_ts, fromAgg)
+}
+
+func (c *TopSQLClient) queryTopNSQL(instanceIDs []int, windowSize, topN uint, start_ts int64, end_ts int64, fromAgg bool) error {
 	cli := c.dbConn.GetSQLClient()
 	defer c.dbConn.PutSQLClient(cli)
 
@@ -72,7 +82,13 @@ func (c *TopSQLClient) queryTopNSQL(instanceIDs []int, windowSize, topN uint, st
 	for {
 		for _, id := range instanceIDs {
 			instance := InstanceMeta{id: id}
-			query := fmt.Sprintf(queryTopNSQLQuery, windowSize, instance.getTableName(), start_ts, end_ts, topN)
+			var tableName string
+			if fromAgg {
+				tableName = instance.getAggTableName()
+			} else {
+				tableName = instance.getTableName()
+			}
+			query := fmt.Sprintf(queryTopNSQLQuery, windowSize, tableName, start_ts, end_ts, topN)
 			if first {
 				fmt.Println(query)
 				first = false
@@ -88,7 +104,7 @@ func (c *TopSQLClient) queryTopNSQL(instanceIDs []int, windowSize, topN uint, st
 			if err != nil {
 				return err
 			}
-			fmt.Printf("query %v, start_ts: %v, minute: %.1f, topN: %v, cost: %v\n", instance.getTableName(), start_ts, (time.Second * time.Duration(end_ts-start_ts+1)).Minutes(), topN, time.Since(start))
+			fmt.Printf("query %v, start_ts: %v, minute: %.1f, topN: %v, cost: %v\n", tableName, start_ts, (time.Second * time.Duration(end_ts-start_ts+1)).Minutes(), topN, time.Since(start))
 		}
 	}
 }
@@ -183,6 +199,48 @@ func (c *TopSQLClient) InitSchemaForInstance(instanceCount int) error {
 	return nil
 }
 
+func (c *TopSQLClient) InitSchemaForInstanceAgg(instanceCount int) error {
+	cli := c.dbConn.GetSQLClient()
+	defer c.dbConn.PutSQLClient(cli)
+	instances := make([]InstanceMeta, 0, instanceCount)
+	for i := 1; i <= instanceCount; i++ {
+		instance := InstanceMeta{
+			ip: "instance_" + strconv.Itoa(i),
+			id: i,
+		}
+		instances = append(instances, instance)
+		schema := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+	sql_id BIGINT NOT NULL,
+	plan_id BIGINT,
+	timestamp BIGINT NOT NULL,
+	cpu_time_ms INT NOT NULL
+);`, instance.getAggTableName())
+
+		_, err := cli.Exec(schema)
+		if err != nil {
+			return err
+		}
+		setTiflash := fmt.Sprintf("alter table %v set tiflash replica 1;", instance.getAggTableName())
+		// ignore the error.
+		cli.Exec(setTiflash)
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0, 4096))
+	buf.WriteString("insert ignore instance_meta values ")
+	for i, instance := range instances {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(fmt.Sprintf("(%v,'%v')", instance.id, instance.ip))
+	}
+	_, err := cli.Exec(buf.String())
+	if err != nil {
+		return err
+	}
+	c.instances = instances
+	return nil
+}
+
 type InstanceMeta struct {
 	ip string
 	id int
@@ -192,6 +250,10 @@ func (m *InstanceMeta) getTableName() string {
 	return fmt.Sprintf("instance_%v_metrics", m.id)
 }
 
+func (m *InstanceMeta) getAggTableName() string {
+	return fmt.Sprintf("instance_%v_metrics_agg", m.id)
+}
+
 type InsertMeta struct {
 	sql        string
 	plan       string
@@ -199,6 +261,51 @@ type InsertMeta struct {
 	planDigest []byte
 	sqlID      int
 	planID     int
+}
+
+func (c *TopSQLClient) LoadAggMetricsData(start_ts int64, end_ts int64) {
+	if c.concurrency < 1 {
+		c.concurrency = 1
+	}
+	limitCh := make(chan struct{}, c.concurrency)
+	step := int64(1200) // 20min
+	var wg sync.WaitGroup
+	for ts := start_ts; ts < end_ts; ts += step {
+		start := ts
+		end := start + step
+		limitCh <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				<-limitCh
+				defer wg.Done()
+			}()
+			err := c.loadAggMetricsData(start, end)
+			if err != nil {
+				fmt.Printf("%v", err)
+				os.Exit(-1)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func (c *TopSQLClient) loadAggMetricsData(start_ts int64, end_ts int64) error {
+	cli := c.dbConn.GetSQLClient()
+	defer c.dbConn.PutSQLClient(cli)
+
+	for _, instance := range c.instances {
+		loadSQL := fmt.Sprintf(`insert into %v SELECT sql_id,plan_id, (timestamp DIV 60) * 60 AS time_window, sum(cpu_time_ms) AS cpu_time_agg
+                                FROM %v
+                                WHERE timestamp >= %v
+                                  AND timestamp <  %v
+                                GROUP BY time_window, sql_id, plan_id ORDER BY time_window`, instance.getAggTableName(), instance.getTableName(), start_ts, end_ts)
+		_, err := cli.Exec(loadSQL)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *TopSQLClient) LoadMetricsData(start_ts int64, end_ts int64, sqlCount, sqlChangeMinute int) {
@@ -300,6 +407,7 @@ func (c *TopSQLClient) insertMetrics(start_ts, end_ts int64, metas []InsertMeta,
 		args = args[:0]
 		for j := 0; j < len(metas); j++ {
 			args = append(args, metas[j].sqlID, metas[j].planID, ts, rand.Intn(100))
+			//args = append(args, metas[j].sqlID, metas[j].planID, ts, metas[j].sqlID%100)
 		}
 		_, err = stmt.Exec(args...)
 		if err != nil {
